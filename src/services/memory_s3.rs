@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::fs::{self, File};
 use std::io::{Write, Read};
 use std::path::Path;
-use log::{info, error, debug};
+use log::{info, error};
 
 #[derive(Clone, Debug)]
 pub struct MemoryS3Service {

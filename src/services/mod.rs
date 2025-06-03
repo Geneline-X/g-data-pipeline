@@ -6,6 +6,8 @@ pub mod memory_db;
 pub mod memory_redis;
 pub mod memory_s3;
 pub mod ai;
+pub mod conversation;
+pub mod query_translator;
 
 use anyhow::Result;
 

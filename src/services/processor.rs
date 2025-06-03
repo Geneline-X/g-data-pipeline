@@ -61,6 +61,11 @@ where
     ///  - parse CSV 
     ///  - generate insights (no chart rendering here)
     ///  - cache the JSON(insights) in Redis
+    /// Get a reference to the S3 service
+    pub fn get_s3_service(&self) -> &S {
+        &self.s3_service
+    }
+    
     pub async fn process_job(&self, job_id: Uuid) -> Result<()> {
         log::info!("🔍 [Job-{}] Starting job processing", job_id);
         log::info!("📃 [Job-{}] Processing details: bucket={}", job_id, self.s3_bucket);

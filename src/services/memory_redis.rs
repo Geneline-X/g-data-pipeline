@@ -1,8 +1,7 @@
-use anyhow::{Result, anyhow, Context};
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub struct MemoryRedisService {

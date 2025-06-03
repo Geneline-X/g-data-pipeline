@@ -1,6 +1,6 @@
 use std::time::Duration;
-use anyhow::{Result, anyhow, Context};
-use log::{info, error, debug, warn};
+use anyhow::{Result, anyhow};
+use log::{info, error, debug};
 use reqwest::Client;
 use serde_json::{json, Value};
 
@@ -174,5 +174,131 @@ impl AIService {
 
         info!("Successfully generated AI summary");
         Ok(ai_summary)
+    }
+    
+    /// Generate a structured query from a natural language query
+    pub async fn generate_query_translation(&self, prompt_data: &Value) -> Result<Value> {
+        // Check if API key is available
+        let api_key = match &self.api_key {
+            Some(key) if !key.trim().is_empty() => key,
+            _ => {
+                error!("OpenAI API key is not available. Cannot translate query.");
+                return Err(anyhow!("OpenAI API key is not available"));
+            }
+        };
+        
+        info!("Translating natural language query to structured query");
+        
+        // Create a client with a 15-second timeout
+        let client = match Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build() {
+                Ok(client) => client,
+                Err(e) => {
+                    error!("Failed to build HTTP client: {}", e);
+                    return Err(anyhow!("Failed to build HTTP client: {}", e));
+                }
+            };
+            
+        // Construct the system prompt
+        let system_prompt = r#"You are a data query translator that converts natural language queries into structured queries for data analysis. 
+You analyze the user's query in the context of their dataset and conversation history, then return a structured JSON representation of the query that can be executed by a data processing system.
+
+Your response must be a valid JSON object with the following structure:
+{
+  "intent": "Aggregate|Filter|Sort|Describe|Visualize",
+  "columns": ["column1", "column2", ...],
+  "operations": [
+    {"type": "Mean", "column": "column_name"},
+    {"type": "GroupBy", "column": "column_name"},
+    {"type": "Filter", "column": "column_name", "operator": ">", "value": "10"},
+    ...
+  ]
+}
+
+Be precise and only include columns that exist in the dataset. If the query is ambiguous, make a reasonable guess based on the dataset schema and conversation history."#;
+        
+        // Create the request body
+        let request_body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": prompt_data
+                }
+            ],
+            "response_format": { "type": "json_object" }
+        });
+        
+        info!("Sending query translation request to OpenAI API");
+        
+        // Send the request with detailed error handling
+        let response = match client
+            .post("https://api.openai.com/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    error!("Failed to send request to OpenAI API: {}", e);
+                    if e.is_timeout() {
+                        error!("Request timed out after 15 seconds");
+                        return Err(anyhow!("OpenAI API request timed out after 15 seconds"));
+                    } else if e.is_connect() {
+                        error!("Connection error: {}", e);
+                        return Err(anyhow!("Failed to connect to OpenAI API: {}", e));
+                    } else {
+                        return Err(anyhow!("Failed to send request to OpenAI API: {}", e));
+                    }
+                }
+            };
+
+        let status = response.status();
+        info!("OpenAI API response status: {}", status);
+        
+        if !status.is_success() {
+            let error_text = response.text().await
+                .unwrap_or_else(|_| "Could not read error response".to_string());
+            error!("OpenAI API error: Status {}, Details: {}", status, error_text);
+            return Err(anyhow!("OpenAI API error: Status {}, Details: {}", status, error_text));
+        }
+        
+        // Parse the response with detailed error handling
+        let response_json: Value = match response.json().await {
+            Ok(json) => json,
+            Err(e) => {
+                error!("Failed to parse OpenAI API response as JSON: {}", e);
+                return Err(anyhow!("Failed to parse OpenAI API response: {}", e));
+            }
+        };
+            
+        debug!("OpenAI API response received");
+        
+        // Extract the content from the response
+        let content = match response_json["choices"][0]["message"]["content"].as_str() {
+            Some(content) => content,
+            None => {
+                error!("Could not extract content from OpenAI response: {:?}", response_json);
+                return Err(anyhow!("Could not extract content from OpenAI response"));
+            }
+        };
+
+        info!("Successfully translated query");
+        
+        // Parse the content as JSON
+        match serde_json::from_str::<Value>(content) {
+            Ok(parsed) => Ok(parsed),
+            Err(e) => {
+                error!("Failed to parse query translation from OpenAI response: {}", e);
+                error!("Raw content received: {}", content);
+                return Err(anyhow!("Failed to parse query translation: {}", e));
+            }
+        }
     }
 }

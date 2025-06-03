@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use crate::models::job::{Job, JobStatus, NewJob};
 

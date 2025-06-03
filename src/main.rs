@@ -12,7 +12,9 @@ use services::DataProcessor;
 use services::memory_s3::MemoryS3Service;
 use services::memory_db::MemoryDatabaseService;
 use services::memory_redis::MemoryRedisService;
-use handlers::{upload_csv, get_insights};
+use services::conversation::ConversationService;
+use services::ai::AIService;
+use handlers::{upload_csv, get_insights, query_endpoint};
 use uuid::Uuid;
 
 #[actix_web::main]
@@ -37,6 +39,33 @@ async fn main() -> std::io::Result<()> {
         redis_service.clone(),
         config.s3_bucket.clone(),
     );
+    
+    // Initialize AI service if API key is available
+    let ai_service = if let Some(api_key) = &config.open_ai_key {
+        if !api_key.is_empty() {
+            log::info!("🤖 AI service initialized with OpenAI API key");
+            match AIService::new(&config) {
+                Ok(service) => service,
+                Err(e) => {
+                    log::error!("❌ Failed to initialize AI service: {}", e);
+                    None
+                }
+            }
+        } else {
+            log::warn!("⚠️ OpenAI API key is empty, AI service will not be available");
+            None
+        }
+    } else {
+        log::warn!("⚠️ No OpenAI API key found, AI service will not be available");
+        None
+    };
+    
+    // Initialize conversation service
+    let conversation_service = Arc::new(ConversationService::new(
+        ai_service,
+        processor.clone(),
+    ));
+    log::info!("💬 Conversation service initialized");
     
     // Create a channel for job processing
     let (tx, mut rx) = mpsc::channel::<Uuid>(32);
@@ -88,6 +117,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(redis_service.clone()))
             .app_data(web::Data::new(processor.clone()))
             .app_data(web::Data::new(tx.clone()))
+            .app_data(web::Data::new(conversation_service.clone()))
             .service(
                 web::resource("/upload")
                     .route(web::post().to(upload_csv::<MemoryS3Service, MemoryDatabaseService>))
@@ -95,6 +125,10 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/insights/{job_id}")
                     .route(web::get().to(get_insights::<MemoryS3Service, MemoryDatabaseService, MemoryRedisService>))
+            )
+            .service(
+                web::resource("/api/conversation/query")
+                    .route(web::post().to(query_endpoint::<MemoryS3Service, MemoryDatabaseService, MemoryRedisService>))
             )
             .service(
                 web::resource("/debug/files")
