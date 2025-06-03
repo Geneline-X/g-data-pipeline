@@ -5,6 +5,7 @@ pub mod processor;
 pub mod memory_db;
 pub mod memory_redis;
 pub mod memory_s3;
+pub mod ai;
 
 use anyhow::Result;
 

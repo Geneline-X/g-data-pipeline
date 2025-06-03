@@ -3,9 +3,11 @@ use polars::prelude::*;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::models::job::JobStatus;
+use crate::models::job::{Job, JobStatus};
 use crate::models::response::{Insights, DataSummary, ColumnStatistics};
 use crate::services::{S3ServiceTrait, DatabaseServiceTrait, RedisServiceTrait};
+use crate::services::ai::AIService;
+use crate::config::Config;
 
 #[derive(Clone, Debug)]
 pub struct DataProcessor<S, D, R>
@@ -17,6 +19,7 @@ where
     s3_service: S,
     db_service: D,
     redis_service: R,
+    ai_service: Option<AIService>,
     s3_bucket: String,
 }
 
@@ -26,16 +29,30 @@ where
     D: DatabaseServiceTrait + Clone + std::fmt::Debug,
     R: RedisServiceTrait + Clone + std::fmt::Debug,
 {
-    pub fn new(
-        s3_service: S,
-        db_service: D,
-        redis_service: R,
-        s3_bucket: String,
-    ) -> Self {
+    pub fn new(s3_service: S, db_service: D, redis_service: R, s3_bucket: String) -> Self {
+        // Load config from environment
+        let config = Config::from_env();
+        
+        // Try to initialize the AI service, but don't fail if it can't be created
+        let ai_service = match AIService::new(&config) {
+            Ok(service_option) => service_option,
+            Err(e) => {
+                log::warn!("Failed to initialize AI service: {}", e);
+                None
+            }
+        };
+        
+        if ai_service.is_some() {
+            log::info!("AI service initialized successfully");
+        } else {
+            log::info!("AI service not available - AI analysis features will be disabled");
+        }
+        
         Self {
             s3_service,
             db_service,
             redis_service,
+            ai_service,
             s3_bucket,
         }
     }
@@ -92,8 +109,38 @@ where
                             Ok(result) => {
                                 let insights_duration = insights_start.elapsed();
                                 log::info!("✅ [Job-{}] Successfully generated insights in {:.2?}", job_id, insights_duration);
-                                let insights = result;
-    
+                                // Store the initial insights result
+                                let mut insights = result;
+                                
+                                // If AI service is available, generate AI summary with timeout
+                                if let Some(ai_service) = &self.ai_service {
+                                    log::info!("🤖 [Job-{}] Generating AI summary and visualization recommendations", job_id);
+                                    let insights_json = serde_json::to_value(&insights).unwrap_or_default();
+                                    
+                                    // Create a timeout future
+                                    use tokio::time::{timeout, Duration};
+                                    
+                                    // Set a 15-second timeout for AI summary generation
+                                    match timeout(Duration::from_secs(15), ai_service.generate_data_summary(&insights_json)).await {
+                                        Ok(result) => {
+                                            match result {
+                                                Ok(ai_summary) => {
+                                                    log::info!("✅ [Job-{}] Successfully generated AI summary", job_id);
+                                                    insights.ai_analysis = Some(ai_summary);
+                                                },
+                                                Err(e) => {
+                                                    log::warn!("⚠️ [Job-{}] Failed to generate AI summary: {}", job_id, e);
+                                                    // Continue processing even if AI summary generation fails
+                                                }
+                                            }
+                                        },
+                                        Err(_) => {
+                                            log::warn!("⚠️ [Job-{}] AI summary generation timed out after 15 seconds", job_id);
+                                            // Continue processing even if AI summary generation times out
+                                        }
+                                    }
+                                }
+
                                 log::info!("💾 [Job-{}] Caching insights in Redis", job_id);
                                 match self.redis_service.cache_insights(job_id, &insights) {
                                     Ok(_) => {
@@ -340,6 +387,7 @@ where
             data_summary,
             column_statistics: column_stats,
             correlations,
+            ai_analysis: None,
         })
     }
 }

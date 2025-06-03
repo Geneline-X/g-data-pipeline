@@ -46,12 +46,30 @@ pub struct DataSummary {
     pub summary_text: String,
 }
 
+/// Visualization recommendation from AI analysis
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct VisualizationRecommendation {
+    pub chart_type: String,
+    pub title: String,
+    pub description: String,
+    pub columns: Vec<String>,
+}
+
+/// AI-generated summary and recommendations
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct AISummary {
+    pub summary: String,
+    pub key_insights: Vec<String>,
+    pub visualization_recommendations: Vec<VisualizationRecommendation>,
+}
+
 /// Represents insights generated from data analysis
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Insights {
     pub data_summary: DataSummary,
     pub column_statistics: Vec<ColumnStatistics>,
     pub correlations: Option<HashMap<String, f64>>,
+    pub ai_analysis: Option<AISummary>,
 }
 
 /// Response for insights endpoint

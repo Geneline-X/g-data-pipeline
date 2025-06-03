@@ -10,6 +10,10 @@ A high-performance, scalable API for processing CSV data, generating insights, a
   - Mean, median, min, max, standard deviation
   - 25th and 75th percentiles
   - Frequency analysis and unique value counts
+- AI-powered data analysis and visualization recommendations
+  - Automatic data summarization in business-friendly language
+  - Key insights extraction from complex datasets
+  - Smart visualization recommendations based on data types
 - Intelligent date parsing for automatic conversion of string columns to date types
 - Chart generation with Plotters
 - Caching with Redis for fast retrieval
@@ -140,6 +144,36 @@ Response:
       "categorical": ["gender", "country", "education"],
       "date": ["registration_date", "last_login"],
       "text": ["comments"]
+    },
+    "ai_analysis": {
+      "summary": "This dataset contains demographic and registration information for 4,807 individuals, predominantly Sierra Leonean nationals (99.9%). The gender distribution shows 60.6% male and 39.4% female participants. Most individuals are single (95.1%) with a small percentage married (4.6%). The data spans multiple provinces with Eastern (28%), Southern (26%), and Northern (25.5%) provinces having similar representation, while Western province accounts for 20.3%.",
+      "key_insights": [
+        "The dataset shows a significant gender imbalance with males representing over 60% of records",
+        "Almost all individuals (95.1%) are recorded as single, which may indicate a young population or data collection bias",
+        "Income values appear to be inconsistently formatted and would benefit from standardization",
+        "Date columns (date of birth, date joined scheme) are currently stored as strings and should be converted to proper date types",
+        "Geographic distribution across provinces is relatively balanced, with slightly higher representation from Eastern province"
+      ],
+      "visualization_recommendations": [
+        {
+          "chart_type": "pie_chart",
+          "title": "Gender Distribution",
+          "description": "Visualize the proportion of males vs females in the dataset",
+          "columns": ["sex"]
+        },
+        {
+          "chart_type": "bar_chart",
+          "title": "Provincial Distribution",
+          "description": "Compare the number of individuals across different provinces",
+          "columns": ["province"]
+        },
+        {
+          "chart_type": "histogram",
+          "title": "Income Distribution",
+          "description": "Analyze the distribution of income values after standardization",
+          "columns": [" income as at joining scheme "]
+        }
+      ]
     }
   },
   "chart_url": "s3://bucket/charts/uuid.png"

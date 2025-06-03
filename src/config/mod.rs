@@ -8,11 +8,18 @@ pub struct Config {
     pub aws_region: String,
     pub s3_bucket: String,
     pub server_port: u16,
+    pub open_ai_key: Option<String>,
 }
 
 impl Config {
     pub fn from_env() -> Self {
         dotenv().ok();
+
+        // Get OpenAI API key as optional
+        let open_ai_key = match env::var("OPEN_AI_KEY") {
+            Ok(key) if !key.trim().is_empty() => Some(key),
+            _ => None,
+        };
 
         Self {
             database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
@@ -23,6 +30,7 @@ impl Config {
                 .unwrap_or_else(|_| "8080".to_string())
                 .parse()
                 .expect("SERVER_PORT must be a valid port number"),
+            open_ai_key,
         }
     }
 }
