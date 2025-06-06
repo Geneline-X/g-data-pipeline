@@ -4,6 +4,7 @@ mod services;
 mod handlers;
 
 use actix_web::{web, App, HttpServer, middleware::Logger, HttpResponse};
+use actix_cors::Cors;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -110,7 +111,15 @@ async fn main() -> std::io::Result<()> {
     log::info!("🌐 Starting server at {}", server_url);
     
     HttpServer::new(move || {
+        let cors = Cors::default()
+                .allowed_origin("http://localhost:3001")
+                .allowed_methods(vec!["GET", "POST"])
+                .allowed_headers(vec![actix_web::http::header::AUTHORIZATION, actix_web::http::header::ACCEPT])
+                .allowed_header(actix_web::http::header::CONTENT_TYPE)
+                .max_age(3600);
+
         App::new()
+            .wrap(cors)
             .wrap(Logger::default())
             .app_data(web::Data::new(s3_service.clone()))
             .app_data(web::Data::new(db_service.clone()))

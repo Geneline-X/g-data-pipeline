@@ -88,6 +88,6 @@ pub struct QueryResponse {
     pub response: String,
     /// Any data returned by the query (as JSON)
     pub data: Option<serde_json::Value>,
-    /// Optional URL to a visualization
-    pub visualization_url: Option<String>,
+    /// Optional JSON data for visualization (e.g., Chart.js config)
+    pub visualization_data: Option<serde_json::Value>,
 }

@@ -111,21 +111,215 @@ where
             }
         };
         
-        // Process the query
-        let (response, data) = self.execute_query(&request.query, &context).await?;
-        
-        // Add the turn to the conversation
-        context.add_turn(request.query.clone(), response.clone());
-        
-        // Store the updated context
+        // Translate the query to a structured query
+        let structured_query = match self.query_translator.translate_query(&request.query, &context).await {
+            Ok(query) => query,
+            Err(e) => {
+                error!("Failed to translate query: {}", e);
+                return Ok(QueryResponse {
+                    conversation_id: context.id,
+                    response: format!("I couldn't understand your query: {}", e),
+                    data: None,
+                    visualization_data: None,
+                });
+            }
+        };
+
+        // Execute the structured query
+        let s3_service = self.data_processor.get_s3_service();
+        let df = match self.query_translator.execute_query(&structured_query, &context.job_id, s3_service).await {
+            Ok(df) => df,
+            Err(e) => {
+                error!("Failed to execute query: {}", e);
+                return Ok(QueryResponse {
+                    conversation_id: context.id,
+                    response: format!("I couldn't execute your query: {}", e),
+                    data: None,
+                    visualization_data: None,
+                });
+            }
+        };
+
+        // Check if the DataFrame is empty
+        if df.height() == 0 {
+            return Ok(QueryResponse {
+                conversation_id: context.id,
+                response: "No data found for your query.".to_string(),
+                data: Some(json!({"result": "empty"})),
+                visualization_data: None,
+            });
+        }
+
+        // Convert the DataFrame to JSON using JsonWriter
+        let json_result = match {
+            let mut buf = Vec::new();
+            let mut df_mut = df.clone();
+            JsonWriter::new(&mut buf)
+                .with_json_format(JsonFormat::Json)
+                .finish(&mut df_mut)
+                .context("Failed to write DataFrame to JSON")?;
+            let json_string = std::str::from_utf8(&buf)
+                .context("Failed to convert JSON bytes to string")?
+                .to_string();
+            serde_json::from_str::<Value>(&json_string)
+                .context("Failed to parse JSON string into Value")
+        } {
+            Ok(json_value) => json_value,
+            Err(e) => {
+                error!("Failed to convert DataFrame to JSON: {}", e);
+                return Ok(QueryResponse {
+                    conversation_id: context.id,
+                    response: format!("I couldn't format the results: {}", e),
+                    data: None,
+                    visualization_data: None,
+                });
+            }
+        };
+
+        // Prepare visualization_data if intent is Visualize
+        let mut visualization_data = None;
+        use crate::services::query_translator::QueryIntent;
+        if let QueryIntent::Visualize = structured_query.intent {
+            if let Some(data_array) = json_result.as_array() {
+                if !data_array.is_empty() {
+                    let first_row = &data_array[0];
+                    if let Some(obj) = first_row.as_object() {
+                        // Try numeric columns (for averages, distributions)
+                        let mut numeric_cols: Vec<String> = Vec::new();
+                        for (k, v) in obj.iter() {
+                            if v.is_number() || (v.is_string() && v.as_str().unwrap().trim().parse::<f64>().is_ok()) {
+                                numeric_cols.push(k.clone());
+                            }
+                        }
+                        if !numeric_cols.is_empty() {
+                            // Compute averages for each numeric column
+                            let mut averages = Vec::new();
+                            for col in &numeric_cols {
+                                let mut sum = 0.0;
+                                let mut count = 0.0;
+                                for row in data_array.iter() {
+                                    if let Some(val) = row.get(col) {
+                                        if val.is_number() {
+                                            if let Some(f) = val.as_f64() {
+                                                sum += f;
+                                                count += 1.0;
+                                            }
+                                        } else if val.is_string() {
+                                            if let Ok(f) = val.as_str().unwrap().trim().parse::<f64>() {
+                                                sum += f;
+                                                count += 1.0;
+                                            }
+                                        }
+                                    }
+                                }
+                                if count > 0.0 {
+                                    averages.push(sum / count);
+                                } else {
+                                    averages.push(0.0);
+                                }
+                            }
+                            let chart_json = serde_json::json!({
+                                "type": "bar",
+                                "data": {
+                                    "labels": numeric_cols,
+                                    "datasets": [{
+                                        "label": "Average",
+                                        "data": averages
+                                    }]
+                                },
+                                "options": {}
+                            });
+                            visualization_data = Some(chart_json);
+                        } else {
+                            // Try categorical columns (value counts)
+                            let mut categorical_cols: Vec<String> = Vec::new();
+                            for (k, v) in obj.iter() {
+                                if v.is_string() {
+                                    categorical_cols.push(k.clone());
+                                }
+                            }
+                            if !categorical_cols.is_empty() {
+                                let col = &categorical_cols[0];
+                                let mut counts = std::collections::HashMap::new();
+                                for row in data_array.iter() {
+                                    if let Some(val) = row.get(col) {
+                                        if let Some(s) = val.as_str() {
+                                            *counts.entry(s.to_string()).or_insert(0) += 1;
+                                        }
+                                    }
+                                }
+                                let mut labels = Vec::new();
+                                let mut values = Vec::new();
+                                for (label, value) in counts.iter() {
+                                    labels.push(label.clone());
+                                    values.push(*value);
+                                }
+                                let chart_json = serde_json::json!({
+                                    "type": "bar",
+                                    "data": {
+                                        "labels": labels,
+                                        "datasets": [{
+                                            "label": format!("{} count", col),
+                                            "data": values
+                                        }]
+                                    },
+                                    "options": {}
+                                });
+                                visualization_data = Some(chart_json);
+                            } else {
+                                // Fallback: no suitable columns found, show a table config
+                                let columns: Vec<String> = obj.keys().cloned().collect();
+                                let rows: Vec<Vec<String>> = data_array.iter().map(|row| {
+                                    columns.iter().map(|col| {
+                                        row.get(col).map(|v| v.to_string()).unwrap_or_default()
+                                    }).collect()
+                                }).collect();
+                                let chart_json = serde_json::json!({
+                                    "type": "table",
+                                    "data": {
+                                        "columns": columns,
+                                        "rows": rows
+                                    },
+                                    "options": {}
+                                });
+                                visualization_data = Some(chart_json);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Generate a dynamic AI response
+        let ai_response = if let Some(ai_service) = &self.ai_service {
+            // Compose a prompt with query, intent, and a sample of the data
+            let prompt = json!({
+                "query": request.query,
+                "intent": format!("{:?}", structured_query.intent),
+                "result_sample": json_result.as_array().and_then(|arr| arr.get(0)).cloned().unwrap_or(json!({})),
+                "result_columns": df.get_column_names(),
+                "result_row_count": df.height(),
+            });
+            match ai_service.generate_data_summary(&prompt).await {
+                Ok(summary) => summary.summary,
+                Err(e) => {
+                    error!("AIService failed to generate summary: {}", e);
+                    "Here are the results for your query.".to_string()
+                }
+            }
+        } else {
+            "Here are the results for your query.".to_string()
+        };
+
+        // Add the real AI response to the conversation
+        context.add_turn(request.query.clone(), ai_response.clone());
         self.store.store(context.clone())?;
-        
-        // Return the response
+
         Ok(QueryResponse {
             conversation_id: context.id,
-            response,
-            data: Some(data),
-            visualization_url: None, // We'll add visualization support later
+            response: ai_response,
+            data: Some(json_result),
+            visualization_data,
         })
     }
 

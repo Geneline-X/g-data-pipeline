@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::models::job::{Job, JobStatus};
-use crate::models::response::{Insights, DataSummary, ColumnStatistics};
+use crate::models::response::{Insights, DataSummary, ColumnStatistics, AISummary, ActionableRecommendation};
 use crate::services::{S3ServiceTrait, DatabaseServiceTrait, RedisServiceTrait};
 use crate::services::ai::AIService;
 use crate::config::Config;
@@ -119,57 +119,116 @@ where
                                 
                                 // If AI service is available, generate AI summary with timeout
                                 if let Some(ai_service) = &self.ai_service {
-                                    log::info!("🤖 [Job-{}] Generating AI summary and visualization recommendations", job_id);
-                                    let insights_json = serde_json::to_value(&insights).unwrap_or_default();
-                                    
-                                    // Create a timeout future
-                                    use tokio::time::{timeout, Duration};
-                                    
-                                    // Set a 15-second timeout for AI summary generation
-                                    match timeout(Duration::from_secs(15), ai_service.generate_data_summary(&insights_json)).await {
-                                        Ok(result) => {
-                                            match result {
-                                                Ok(ai_summary) => {
-                                                    log::info!("✅ [Job-{}] Successfully generated AI summary", job_id);
-                                                    insights.ai_analysis = Some(ai_summary);
-                                                },
-                                                Err(e) => {
-                                                    log::warn!("⚠️ [Job-{}] Failed to generate AI summary: {}", job_id, e);
-                                                    // Continue processing even if AI summary generation fails
-                                                }
-                                            }
-                                        },
-                                        Err(_) => {
-                                            log::warn!("⚠️ [Job-{}] AI summary generation timed out after 15 seconds", job_id);
-                                            // Continue processing even if AI summary generation times out
-                                        }
-                                    }
-                                }
+    log::info!("🤖 [Job-{}] Generating AI summary and visualization recommendations", job_id);
+    let insights_json = serde_json::to_value(&insights).unwrap_or_default();
+    use tokio::time::{timeout, Duration};
+    let mut ai_summary_result: Option<AISummary> = None;
+    let mut last_error: Option<String> = None;
+    // First attempt
+    match timeout(Duration::from_secs(15), ai_service.generate_data_summary(&insights_json)).await {
+        Ok(result) => {
+            match result {
+                Ok(ai_summary) => {
+                    log::info!("✅ [Job-{}] Successfully generated AI summary (attempt 1)", job_id);
+                    ai_summary_result = Some(ai_summary);
+                },
+                Err(e) => {
+                    log::warn!("⚠️ [Job-{}] Failed to generate AI summary (attempt 1): {}", job_id, e);
+                    last_error = Some(format!("AI error: {}", e));
+                }
+            }
+        },
+        Err(_) => {
+            log::warn!("⚠️ [Job-{}] AI summary generation timed out after 15 seconds (attempt 1)", job_id);
+            last_error = Some("AI timeout after 15 seconds (attempt 1)".to_string());
+        }
+    }
+    // Retry if failed or empty
+    let mut needs_retry = ai_summary_result.as_ref().map_or(true, |ai_summary| {
+        ai_summary.summary.trim().is_empty()
+            && ai_summary.key_insights.is_empty()
+            && ai_summary.actionable_recommendations.is_empty()
+            && ai_summary.visualization_recommendations.is_empty()
+    });
+    if needs_retry {
+        log::info!("🔁 [Job-{}] Retrying AI summary generation (attempt 2)", job_id);
+        match timeout(Duration::from_secs(15), ai_service.generate_data_summary(&insights_json)).await {
+            Ok(result) => {
+                match result {
+                    Ok(ai_summary) => {
+                        log::info!("✅ [Job-{}] Successfully generated AI summary (attempt 2)", job_id);
+                        ai_summary_result = Some(ai_summary);
+                        last_error = None;
+                    },
+                    Err(e) => {
+                        log::warn!("⚠️ [Job-{}] Failed to generate AI summary (attempt 2): {}", job_id, e);
+                        last_error = Some(format!("AI error (retry): {}", e));
+                    }
+                }
+            },
+            Err(_) => {
+                log::warn!("⚠️ [Job-{}] AI summary generation timed out after 15 seconds (attempt 2)", job_id);
+                last_error = Some("AI timeout after 15 seconds (attempt 2)".to_string());
+            }
+        }
+    }
+    // Validate and set ai_analysis
+    if let Some(ai_summary) = ai_summary_result {
+        let is_empty = ai_summary.summary.trim().is_empty()
+            && ai_summary.key_insights.is_empty()
+            && ai_summary.actionable_recommendations.is_empty()
+            && ai_summary.visualization_recommendations.is_empty();
+        if is_empty {
+            log::warn!("⚠️ [Job-{}] AI summary is empty after retry, setting fallback summary", job_id);
+            insights.ai_analysis = Some(AISummary {
+                summary: format!("AI analysis could not be generated at this time. Last error: {}", last_error.clone().unwrap_or_else(|| "Unknown".to_string())),
+                key_insights: vec!["No insights could be generated from the data.".to_string()],
+                actionable_recommendations: vec![ActionableRecommendation {
+                    recommendation: "Review your dataset for completeness and try again.".to_string(),
+                    rationale: "The AI was unable to extract meaningful patterns or recommendations from the current data.".to_string(),
+                }],
+                visualization_recommendations: vec![],
+            });
+        } else {
+            insights.ai_analysis = Some(ai_summary);
+        }
+    } else {
+        log::warn!("⚠️ [Job-{}] AI summary call failed after retry, setting fallback summary", job_id);
+        insights.ai_analysis = Some(AISummary {
+            summary: format!("AI analysis could not be generated at this time. Last error: {}", last_error.unwrap_or_else(|| "Unknown".to_string())),
+            key_insights: vec!["No insights could be generated from the data.".to_string()],
+            actionable_recommendations: vec![ActionableRecommendation {
+                recommendation: "Review your dataset for completeness and try again.".to_string(),
+                rationale: "The AI was unable to extract meaningful patterns or recommendations from the current data.".to_string(),
+            }],
+            visualization_recommendations: vec![],
+        });
+    }
+}
+log::info!(" [Job-{}] Caching insights in Redis", job_id);
+match self.redis_service.cache_insights(job_id, &insights) {
+    Ok(_) => {
+        log::info!(" [Job-{}] Successfully cached insights in Redis", job_id);
+    },
+    Err(e) => {
+        log::error!(" [Job-{}] Failed to cache insights: {}", job_id, e);
+        return Err(e.into());
+    }
+};
 
-                                log::info!("💾 [Job-{}] Caching insights in Redis", job_id);
-                                match self.redis_service.cache_insights(job_id, &insights) {
-                                    Ok(_) => {
-                                        log::info!("✅ [Job-{}] Successfully cached insights in Redis", job_id);
-                                    },
-                                    Err(e) => {
-                                        log::error!("❌ [Job-{}] Failed to cache insights: {}", job_id, e);
-                                        return Err(e.into());
-                                    }
-                                };
-    
-                                log::info!("✅ [Job-{}] Updating status to Completed", job_id);
-                                match self.db_service.update_job_status(job_id, JobStatus::Completed).await {
-                                    Ok(_) => {
-                                        log::info!("✅ [Job-{}] Successfully updated status to Completed", job_id);
-                                    },
-                                    Err(e) => {
-                                        log::error!("❌ [Job-{}] Failed to update status to Completed: {}", job_id, e);
-                                        return Err(e.into());
-                                    }
-                                };
-    
-                                log::info!("🎉 [Job-{}] Successfully completed processing", job_id);
-                                return Ok(());
+log::info!(" [Job-{}] Updating status to Completed", job_id);
+match self.db_service.update_job_status(job_id, JobStatus::Completed).await {
+    Ok(_) => {
+        log::info!(" [Job-{}] Successfully updated status to Completed", job_id);
+    },
+    Err(e) => {
+        log::error!(" [Job-{}] Failed to update status to Completed: {}", job_id, e);
+        return Err(e.into());
+    }
+};
+
+log::info!(" [Job-{}] Successfully completed processing", job_id);
+return Ok(());
                             },
                             Err(e) => {
                                 log::error!("❌ [Job-{}] Failed to generate insights: {}", job_id, e);

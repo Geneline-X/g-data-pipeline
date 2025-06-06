@@ -10,6 +10,7 @@ external-services = ["sqlx/postgres", "redis/tokio-comp", "rusoto_core", "rusoto
 
 [dependencies]
 actix-web = "4.3"
+actix-cors = "0.7.0"
 actix-multipart = "0.6"
 polars = { version = "0.34", features = ["csv", "lazy", "random", "strings", "describe", "json"] }
 plotters = "0.3"

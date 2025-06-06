@@ -60,7 +60,14 @@ pub struct VisualizationRecommendation {
 pub struct AISummary {
     pub summary: String,
     pub key_insights: Vec<String>,
+    pub actionable_recommendations: Vec<ActionableRecommendation>,
     pub visualization_recommendations: Vec<VisualizationRecommendation>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ActionableRecommendation {
+    pub recommendation: String,
+    pub rationale: String,
 }
 
 /// Represents insights generated from data analysis

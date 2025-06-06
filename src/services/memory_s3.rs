@@ -77,49 +77,68 @@ impl MemoryS3Service {
     pub async fn get_object(&self, bucket: &str, key: &str) -> Result<Vec<u8>> {
         info!("🔍 Retrieving object: {}/{}", bucket, key);
         
-        // Try to get from memory first
-        let storage = self.data.lock().map_err(|e| {
-            error!("Failed to lock storage: {}", e);
-            anyhow!("Failed to lock storage")
-        })?;
-        
-        let full_key = format!("{}/{}", bucket, key);
-        
-        // Check memory cache first
-        if let Some(data) = storage.get(&full_key) {
-            info!("✅ Found data in memory at full key: {} (size: {} bytes)", full_key, data.len());
-            return Ok(data.clone());
-        } 
-        
-        if let Some(data) = storage.get(key) {
-            info!("✅ Found data in memory at key: {} (size: {} bytes)", key, data.len());
-            return Ok(data.clone());
+        // Try to get from memory first. Lock is scoped to release before any .await.
+        let maybe_data_from_memory: Option<Vec<u8>> = {
+            let storage = self.data.lock().map_err(|e| {
+                error!("Failed to lock storage for memory check: {}", e);
+                anyhow!("Failed to lock storage for memory check")
+            })?;
+            let full_key = format!("{}/{}", bucket, key);
+            if let Some(data) = storage.get(&full_key) {
+                info!("✅ Found data in memory at full key: {} (size: {} bytes)", full_key, data.len());
+                Some(data.clone())
+            } else if let Some(data) = storage.get(key) {
+                info!("✅ Found data in memory at key: {} (size: {} bytes)", key, data.len());
+                Some(data.clone())
+            } else {
+                None
+            }
+            // MutexGuard `storage` is dropped here
+        };
+
+        if let Some(data) = maybe_data_from_memory {
+            return Ok(data); // Return if found in memory
         }
-        
-        // If not in memory, try to read from disk
+
+        // If not in memory, proceed to disk read. No MutexGuard held here.
         let file_path = self.get_file_path(key);
+        let file_path_for_blocking = file_path.clone();
         if Path::new(&file_path).exists() {
-            info!("🔍 Reading file from disk: {}", file_path);
-            let mut file = File::open(&file_path).map_err(|e| {
-                error!("Failed to open file {}: {}", file_path, e);
-                anyhow!("Failed to open file: {}", e)
+            let data_from_disk = tokio::task::spawn_blocking(move || {
+                info!("[BLOCKING_TASK] Attempting to open file: {}", file_path_for_blocking);
+                let mut file = File::open(&file_path_for_blocking).map_err(|e| {
+                    error!("[BLOCKING_TASK] Failed to open file {}: {}", file_path_for_blocking, e);
+                    std::io::Error::new(e.kind(), format!("Failed to open file {}: {}", file_path_for_blocking, e))
+                })?;
+                info!("[BLOCKING_TASK] Successfully opened file. Attempting to read: {}", file_path_for_blocking);
+                let mut buffer = Vec::new();
+                file.read_to_end(&mut buffer).map_err(|e| {
+                    error!("[BLOCKING_TASK] Failed to read file {}: {}", file_path_for_blocking, e);
+                    std::io::Error::new(e.kind(), format!("Failed to read file {}: {}", file_path_for_blocking, e))
+                })?;
+                info!("[BLOCKING_TASK] Successfully read file (size: {} bytes): {}", buffer.len(), file_path_for_blocking);
+                Ok::<_, std::io::Error>(buffer)
+            })
+            .await // Async thread awaits completion
+            .inspect(|res| { // Log immediately after await returns
+                match res {
+                    Ok(_) => info!("[ASYNC_TASK] spawn_blocking for file read completed successfully."),
+                    Err(join_error) => error!("[ASYNC_TASK] spawn_blocking for file read failed with JoinError: {}", join_error),
+                }
+            })
+            .map_err(|e| anyhow!("Task join error during file reading: {}", e))? // Handle JoinError
+            .map_err(|e| { // Handle std::io::Error from file operations
+                error!("I/O error during spawned file read (spawn_blocking task): {}", e);
+                anyhow!("I/O error during spawned file read (spawn_blocking task): {}", e)
             })?;
-            
-            let mut data = Vec::new();
-            file.read_to_end(&mut data).map_err(|e| {
-                error!("Failed to read file {}: {}", file_path, e);
-                anyhow!("Failed to read file: {}", e)
-            })?;
-            
-            // Store in memory for next time
             let mut storage = self.data.lock().map_err(|e| {
                 error!("Failed to lock storage: {}", e);
                 anyhow!("Failed to lock storage")
             })?;
-            storage.insert(key.to_string(), data.clone());
+            storage.insert(key.to_string(), data_from_disk.clone());
             
-            info!("✅ Read file from disk: {} (size: {} bytes)", file_path, data.len());
-            return Ok(data);
+            info!("✅ Read file from disk: {} (size: {} bytes)", file_path, data_from_disk.len());
+            return Ok(data_from_disk);
         }
         
         // Not found anywhere

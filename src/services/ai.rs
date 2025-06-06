@@ -54,30 +54,40 @@ impl AIService {
         info!("Insights sample (first 500 chars): {}", insights_sample);
         
         let prompt = format!(r#"
-            Here is a JSON object containing data insights from a CSV file analysis:
-            
-            {}
-            
-            Based on this data, please provide:
-            1. A concise summary of the dataset (2-3 sentences)
-            2. 3-5 key business-relevant insights from the data
-            3. 3-5 recommended visualization types with titles, descriptions, and relevant columns
-            
-            Format your response as a JSON object with the following structure:
-            {{
-                "summary": "A brief summary of the dataset",
-                "key_insights": ["Insight 1", "Insight 2", ...],
-                "visualization_recommendations": [
-                    {{
-                        "chart_type": "bar_chart",
-                        "title": "Distribution of Values",
-                        "description": "Shows the distribution of values across categories",
-                        "columns": ["column1", "column2"]
-                    }},
-                    ...
-                ]
-            }}
-        "#, insights);
+Here is a JSON object containing data insights from a CSV file analysis:
+
+{}
+
+Based on this data, please provide:
+1. A concise summary of the dataset (2-3 sentences)
+2. 3-5 key business-relevant insights from the data (these should be descriptive, highlight trends, patterns, or anomalies, and may include actionable points)
+3. 3-5 actionable business recommendations and suggestions for improvement, with a brief rationale for each
+4. 3-5 recommended visualization types with titles, descriptions, and relevant columns
+
+IMPORTANT: Do NOT return empty arrays or blank fields. If you cannot find any insights or recommendations, explain why in the summary and provide at least one general suggestion. Your response must always contain non-empty, meaningful content for each field.
+
+Format your response as a JSON object with the following structure:
+{{
+    "summary": "A brief summary of the dataset",
+    "key_insights": ["Insight 1", "Insight 2", ...],
+    "actionable_recommendations": [
+        {{
+            "recommendation": "Increase marketing spend in region X",
+            "rationale": "Region X has the highest growth potential based on recent sales trends."
+        }},
+        ...
+    ],
+    "visualization_recommendations": [
+        {{
+            "chart_type": "bar_chart",
+            "title": "Distribution of Values",
+            "description": "Shows the distribution of values across categories",
+            "columns": ["column1", "column2"]
+        }},
+        ...
+    ]
+}}
+"#, insights);
 
         info!("Sending request to OpenAI API");
         
@@ -167,6 +177,23 @@ impl AIService {
             Ok(summary) => summary,
             Err(e) => {
                 error!("Failed to parse AI summary from OpenAI response: {}", e);
+                error!("Raw AI response content: {}", content);
+                // Try to extract JSON substring from the content
+                if let Some(start) = content.find('{') {
+                    if let Some(end) = content.rfind('}') {
+                        let json_str = &content[start..=end];
+                        match serde_json::from_str::<AISummary>(json_str) {
+                            Ok(summary) => {
+                                info!("Successfully parsed AISummary from extracted JSON substring");
+                                return Ok(summary);
+                            },
+                            Err(e2) => {
+                                error!("Failed to parse extracted JSON substring as AISummary: {}", e2);
+                                error!("Extracted JSON substring: {}", json_str);
+                            }
+                        }
+                    }
+                }
                 error!("Raw content received: {}", content);
                 return Err(anyhow!("Failed to parse AI summary from OpenAI response: {}", e));
             }
@@ -218,6 +245,12 @@ Your response must be a valid JSON object with the following structure:
 
 Be precise and only include columns that exist in the dataset. If the query is ambiguous, make a reasonable guess based on the dataset schema and conversation history."#;
         
+        // Convert prompt_data to a JSON string for the API
+        let prompt_data_str = serde_json::to_string(&prompt_data).map_err(|e| {
+            error!("Failed to serialize prompt_data for AI query: {}", e);
+            anyhow!("Failed to serialize prompt_data for AI query")
+        })?;
+
         // Create the request body
         let request_body = json!({
             "model": "gpt-4o",
@@ -228,7 +261,7 @@ Be precise and only include columns that exist in the dataset. If the query is a
                 },
                 {
                     "role": "user",
-                    "content": prompt_data
+                    "content": prompt_data_str // Use the stringified version here
                 }
             ],
             "response_format": { "type": "json_object" }
